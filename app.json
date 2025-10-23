@@ -33,10 +33,15 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
-      ]
+      ],
+      "expo-sqlite",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "openRouterApiKey": "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"
     }
   }
 }
