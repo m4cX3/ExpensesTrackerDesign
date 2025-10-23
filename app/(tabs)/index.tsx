@@ -1,8 +1,7 @@
 import "@/global.css";
 import * as SQLite from "expo-sqlite";
 import { Bot, Edit3, PhilippinePeso, Send, Trash2, TrendingUp } from "lucide-react-native";
-import React, { useEffect, useRef, useState } from "react";
-import { PieChart } from "react-minimal-pie-chart";
+import { useEffect, useRef, useState } from "react";
 import { Dimensions, FlatList, Platform, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { askOpenRouter } from "../../services/deepseek";
 
@@ -23,6 +22,13 @@ type ChatMessage = {
 };
 
 
+// Simple Progress Bar Component
+const ProgressBar = ({ progress, color, height = 8 }: { progress: number; color: string; height?: number }) => (
+  <View style={{ height, backgroundColor: "#ECF0F1", borderRadius: height / 2, overflow: "hidden" }}>
+    <View style={{ height: "100%", width: `${Math.min(progress, 100)}%`, backgroundColor: color, borderRadius: height / 2 }} />
+  </View>
+);
+
 export default function ExpenseTrackerScreen() {
   const [salary, setSalary] = useState<string>("4500");
   const [isEditingSalary, setIsEditingSalary] = useState<boolean>(false);
@@ -33,68 +39,104 @@ export default function ExpenseTrackerScreen() {
   const [inputText, setInputText] = useState<string>("");
   const [isTyping, setIsTyping] = useState<boolean>(false);
   const flatListRef = useRef<FlatList<any>>(null);
+  const dbRef = useRef<any>(null);
 
-  // --- Initialize DB ---
-  let db: ReturnType<typeof SQLite.openDatabaseSync> | null = null;
-  if (Platform.OS !== "web") {
-    try {
-      db = SQLite.openDatabaseSync("expenses.db");
-      (db as any).transaction((tx: any) => {
-        tx.executeSql(
-          `CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            amount REAL NOT NULL,
-            category TEXT NOT NULL,
-            date TEXT NOT NULL
-          );`
-        );
-      });
-    } catch (err) {
-      console.warn("SQLite not available:", err);
-    }
-  }
-
-  // --- Load expenses ---
+  // Initialize DB only once
   useEffect(() => {
-    let loadedExpenses: Expense[] = [];
-    if (Platform.OS === "web" && window.localStorage) {
-      const raw = window.localStorage.getItem("expenses");
-      loadedExpenses = raw ? JSON.parse(raw) : [];
-    } else if (db) {
-      (db as any).transaction((tx: any) => {
-        tx.executeSql(
-          "SELECT * FROM expenses;",
-          [],
-          (_tx: any, result: any) => {
-            for (let i = 0; i < result.rows.length; i++) {
-              loadedExpenses.push(result.rows.item(i));
+    if (Platform.OS !== "web") {
+      try {
+        // Use openDatabaseSync (available in this build) which exposes the transaction API and matches typings
+        dbRef.current = SQLite.openDatabaseSync("expenses.db");
+        
+        // Initialize table
+        dbRef.current.transaction((tx: any) => {
+          tx.executeSql(
+            `CREATE TABLE IF NOT EXISTS expenses (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              title TEXT NOT NULL,
+              amount REAL NOT NULL,
+              category TEXT NOT NULL,
+              date TEXT NOT NULL
+            );`
+          );
+        });
+
+        // Load existing expenses
+        dbRef.current.transaction((tx: any) => {
+          tx.executeSql(
+            "SELECT * FROM expenses ORDER BY date DESC;",
+            [],
+            (_tx: any, result: any) => {
+              const loadedExpenses: Expense[] = [];
+              for (let i = 0; i < result.rows.length; i++) {
+                loadedExpenses.push(result.rows.item(i));
+              }
+              setExpenses(loadedExpenses);
+            },
+            (_tx: any, error: any) => {
+              console.warn("Error loading expenses:", error);
+              return false;
             }
-            setExpenses(loadedExpenses);
-          }
-        );
-      });
+          );
+        });
+      } catch (err) {
+        console.warn("SQLite initialization error:", err);
+      }
+    } else {
+      // Web: load from localStorage
+      if (window.localStorage) {
+        const raw = window.localStorage.getItem("expenses");
+        const loadedExpenses = raw ? JSON.parse(raw) : [];
+        setExpenses(loadedExpenses);
+      }
     }
-    setExpenses(loadedExpenses);
   }, []);
 
-  // --- Save expense ---
+  // Save expense function
   const saveExpense = (expense: Expense) => {
-    setExpenses(prev => [...prev, expense]);
+    const newExpenses = [...expenses, expense];
+    setExpenses(newExpenses);
+    
     if (Platform.OS === "web" && window.localStorage) {
-      const saved = [...expenses, expense];
-      window.localStorage.setItem("expenses", JSON.stringify(saved));
-    } else if (db) {
-      (db as any).transaction((tx: any) => {
+      window.localStorage.setItem("expenses", JSON.stringify(newExpenses));
+    } else if (dbRef.current) {
+      dbRef.current.transaction((tx: any) => {
         tx.executeSql(
           "INSERT INTO expenses (title, amount, category, date) VALUES (?, ?, ?, ?);",
-          [expense.title, expense.amount, expense.category, expense.date]
+          [expense.title, expense.amount, expense.category, expense.date],
+          () => console.log("Expense saved successfully"),
+          (_tx: any, error: any) => {
+            console.warn("Error saving expense:", error);
+            return false;
+          }
         );
       });
     }
   };
 
-  // --- Categorization helper ---
+  // Delete expense function
+  const deleteExpense = (id: number) => {
+    const filtered = expenses.filter(e => e.id !== id);
+    setExpenses(filtered);
+    
+    if (Platform.OS === "web" && window.localStorage) {
+      window.localStorage.setItem("expenses", JSON.stringify(filtered));
+    } else if (dbRef.current) {
+      dbRef.current.transaction((tx: any) => {
+        tx.executeSql(
+          "DELETE FROM expenses WHERE id = ?;",
+          [id],
+          () => console.log("Expense deleted successfully"),
+          (_tx: any, error: any) => {
+            console.warn("Error deleting expense:", error);
+            return false;
+          }
+        );
+      });
+    }
+  };
+
+  // Categorization helper
   const categorizeExpense = (text: string): Expense["category"] => {
     const lower = text.toLowerCase();
     if (["grocery", "groceries", "food", "electric", "rent", "medicine"].some(k => lower.includes(k))) return "Needs";
@@ -103,7 +145,7 @@ export default function ExpenseTrackerScreen() {
     return "Wants";
   };
 
-  // --- Handle AI chat ---
+  // Handle AI chat
   const handleSendMessage = async () => {
     if (!inputText.trim()) return;
 
@@ -155,25 +197,17 @@ export default function ExpenseTrackerScreen() {
       setMessages(prev => [...prev, botMsg]);
 
     } catch (err) {
-      const botMsg: ChatMessage = { id: Date.now() + 1, text: "Sorry, I couldn’t process that right now.", sender: "bot" };
+      const botMsg: ChatMessage = { id: Date.now() + 1, text: "Sorry, I couldn't process that right now.", sender: "bot" };
       setMessages(prev => [...prev, botMsg]);
     } finally {
       setIsTyping(false);
     }
   };
 
-  // --- Totals ---
+  // Totals
   const needsTotal = expenses.filter(e => e.category === "Needs").reduce((s, e) => s + (typeof e.amount === "number" ? e.amount : 0), 0);
   const wantsTotal = expenses.filter(e => e.category === "Wants").reduce((s, e) => s + (typeof e.amount === "number" ? e.amount : 0), 0);
   const savingsTotal = expenses.filter(e => e.category === "Savings").reduce((s, e) => s + (typeof e.amount === "number" ? e.amount : 0), 0);
-
-  const deleteExpense = (id: number) => {
-    const filtered = expenses.filter(e => e.id !== id);
-    setExpenses(filtered);
-    if (Platform.OS === "web" && window.localStorage) {
-      window.localStorage.setItem("expenses", JSON.stringify(filtered));
-    }
-  };
 
   const renderChatItem = ({ item }: { item: ChatMessage }) => (
     <View className={`flex-row mb-3 ${item.sender === "user" ? "justify-end" : "justify-start"}`}>
@@ -182,6 +216,33 @@ export default function ExpenseTrackerScreen() {
       </View>
     </View>
   );
+
+  // Calculate budget data
+  const salaryNum = parseFloat(salary || "0");
+  const budgets = {
+    Needs: salaryNum * 0.5,
+    Wants: salaryNum * 0.3,
+    Savings: salaryNum * 0.2,
+  };
+
+  const spent = {
+    Needs: expenses.filter(e => e.category === "Needs").reduce((sum, e) => sum + e.amount, 0),
+    Wants: expenses.filter(e => e.category === "Wants").reduce((sum, e) => sum + e.amount, 0),
+    Savings: expenses.filter(e => e.category === "Savings").reduce((sum, e) => sum + e.amount, 0),
+  };
+
+  const remaining = {
+    Needs: Math.max(budgets.Needs - spent.Needs, 0),
+    Wants: Math.max(budgets.Wants - spent.Wants, 0),
+    Savings: Math.max(budgets.Savings - spent.Savings, 0),
+  };
+
+  // Data for visualization
+  const budgetData = [
+    { label: "Needs", spent: spent.Needs, budget: budgets.Needs, remaining: remaining.Needs, color: "#3498DB" },
+    { label: "Wants", spent: spent.Wants, budget: budgets.Wants, remaining: remaining.Wants, color: "#9B59B6" },
+    { label: "Savings", spent: spent.Savings, budget: budgets.Savings, remaining: remaining.Savings, color: "#2ECC71" },
+  ];
 
   return (
     <View className="flex-1 bg-[#ECF0F1]">
@@ -192,7 +253,7 @@ export default function ExpenseTrackerScreen() {
       </View>
 
       <ScrollView className="flex-1 px-4 py-6" showsVerticalScrollIndicator={false}>
-        {/* Salary */}
+        {/* Salary Section */}
         <View className="bg-white rounded-2xl p-5 mb-6 shadow-md">
           <View className="flex-row items-center justify-between mb-3">
             <Text className="text-lg font-bold text-[#2C3E50]">Monthly Salary</Text>
@@ -224,96 +285,66 @@ export default function ExpenseTrackerScreen() {
           )}
         </View>
         
-        {/* 50/30/20 Rule Section */}
-<View className="bg-white rounded-2xl p-5 mb-6 shadow-md">
-  <View className="flex-row items-center mb-4">
-    <TrendingUp size={24} color="#3498DB" />
-    <Text className="text-lg font-bold text-[#2C3E50] ml-2">50/30/20 Rule</Text>
-  </View>
-
-  {(() => {
-    const salaryNum = parseFloat(salary || "0");
-    const budgets = {
-      Needs: salaryNum * 0.5,
-      Wants: salaryNum * 0.3,
-      Savings: salaryNum * 0.2,
-    };
-
-    const spent = {
-      Needs: expenses.filter(e => e.category === "Needs").reduce((sum, e) => sum + e.amount, 0),
-      Wants: expenses.filter(e => e.category === "Wants").reduce((sum, e) => sum + e.amount, 0),
-      Savings: expenses.filter(e => e.category === "Savings").reduce((sum, e) => sum + e.amount, 0),
-    };
-
-    const remaining = {
-      Needs: Math.max(budgets.Needs - spent.Needs, 0),
-      Wants: Math.max(budgets.Wants - spent.Wants, 0),
-      Savings: Math.max(budgets.Savings - spent.Savings, 0),
-    };
-
-    // Prepare pie data (use "value" which react-minimal-pie-chart expects)
-    let pieData = [
-      { title: "Needs", value: spent.Needs || 0, color: "#3498DB" },
-      { title: "Wants", value: spent.Wants || 0, color: "#9B59B6" },
-      { title: "Savings", value: spent.Savings || 0, color: "#2ECC71" },
-      { title: "Remaining", value: (remaining.Needs + remaining.Wants + remaining.Savings) || 0, color: "#ECF0F1" },
-    ];
-
-    // Remove zero-value slices to prevent web crash
-    pieData = pieData.filter(slice => slice.value > 0);
-
-    return (
-      <>
-        <View style={{ alignItems: "center", marginBottom: 16 }}>
-          <PieChart
-            data={pieData}
-            background="transparent"
-            style={{ width: width - 40, height: 220 }}
-          />
-        </View>
-
-        {/* Legend with totals */}
-        <View className="flex-row justify-between mt-4">
-          {["Needs", "Wants", "Savings", "Remaining"].map(cat => {
-            const value = cat === "Needs" ? spent.Needs : cat === "Wants" ? spent.Wants : cat === "Savings" ? spent.Savings : remaining.Needs + remaining.Wants + remaining.Savings;
-            const color = cat === "Needs" ? "#3498DB" : cat === "Wants" ? "#9B59B6" : cat === "Savings" ? "#2ECC71" : "#ECF0F1";
-            return (
-              <View key={cat} className="items-center">
-                <View className="w-4 h-4 rounded-full mb-1" style={{ backgroundColor: color }} />
-                <Text className="text-xs text-[#7F8C8D]">{cat}</Text>
-                <Text className="text-sm font-bold text-[#2C3E50]">₱{value.toFixed(0)}</Text>
-              </View>
-            );
-          })}
-        </View>
-      </>
-    );
-  })()}
-</View>
-        {/* Expense Summary */}
+        {/* 50/30/20 Rule Section - UPDATED */}
         <View className="bg-white rounded-2xl p-5 mb-6 shadow-md">
-          {["Needs", "Wants", "Savings"].map((cat) => {
-            const total = cat === "Needs" ? needsTotal : cat === "Wants" ? wantsTotal : savingsTotal;
-            const max = cat === "Needs" ? parseFloat(salary || "0") * 0.5 : cat === "Wants" ? parseFloat(salary || "0") * 0.3 : parseFloat(salary || "0") * 0.2;
-            const color = cat === "Needs" ? "#3498DB" : cat === "Wants" ? "#9B59B6" : "#2ECC71";
-            const percentage = (total / max) * 100;
+          <View className="flex-row items-center mb-4">
+            <TrendingUp size={24} color="#3498DB" />
+            <Text className="text-lg font-bold text-[#2C3E50] ml-2">50/30/20 Rule</Text>
+          </View>
 
-            return (
-              <View key={cat} className="mb-4">
-                <View className="flex-row justify-between mb-1">
-                  <Text className="text-[#7F8C8D]">{cat}</Text>
-                  <Text className="font-bold text-[#2C3E50]">₱{total.toFixed(2)} / ₱{max.toFixed(0)}</Text>
+          {/* Budget Overview */}
+          <View className="space-y-4">
+            {budgetData.map((item) => (
+              <View key={item.label} className="mb-4">
+                <View className="flex-row justify-between mb-2">
+                  <Text className="font-medium text-[#2C3E50]">{item.label}</Text>
+                  <Text className="font-bold text-[#2C3E50]">
+                    ₱{item.spent.toFixed(0)} / ₱{item.budget.toFixed(0)}
+                  </Text>
                 </View>
-                <View className="h-2 bg-[#ECF0F1] rounded-full">
-                  <View className="h-full rounded-full" style={{ width: `${Math.min(percentage, 100)}%`, backgroundColor: color }} />
+                <ProgressBar 
+                  progress={(item.spent / item.budget) * 100} 
+                  color={item.color}
+                  height={12}
+                />
+                <View className="flex-row justify-between mt-1">
+                  <Text className="text-xs text-[#7F8C8D]">
+                    {item.remaining > 0 ? `₱${item.remaining.toFixed(0)} remaining` : "Budget exceeded"}
+                  </Text>
+                  <Text className="text-xs text-[#7F8C8D]">
+                    {Math.min((item.spent / item.budget) * 100, 100).toFixed(0)}%
+                  </Text>
                 </View>
               </View>
-            );
-          })}
+            ))}
+          </View>
+
+          {/* Summary Cards */}
+          <View className="flex-row justify-between mt-6">
+            <View className="items-center flex-1">
+              <View className="w-4 h-4 rounded-full mb-1 bg-[#3498DB]" />
+              <Text className="text-xs text-[#7F8C8D]">Needs</Text>
+              <Text className="text-sm font-bold text-[#2C3E50]">₱{spent.Needs.toFixed(0)}</Text>
+            </View>
+            <View className="items-center flex-1">
+              <View className="w-4 h-4 rounded-full mb-1 bg-[#9B59B6]" />
+              <Text className="text-xs text-[#7F8C8D]">Wants</Text>
+              <Text className="text-sm font-bold text-[#2C3E50]">₱{spent.Wants.toFixed(0)}</Text>
+            </View>
+            <View className="items-center flex-1">
+              <View className="w-4 h-4 rounded-full mb-1 bg-[#2ECC71]" />
+              <Text className="text-xs text-[#7F8C8D]">Savings</Text>
+              <Text className="text-sm font-bold text-[#2C3E50]">₱{spent.Savings.toFixed(0)}</Text>
+            </View>
+            <View className="items-center flex-1">
+              <View className="w-4 h-4 rounded-full mb-1 bg-[#ECF0F1]" />
+              <Text className="text-xs text-[#7F8C8D]">Remaining</Text>
+              <Text className="text-sm font-bold text-[#2C3E50]">
+                ₱{(remaining.Needs + remaining.Wants + remaining.Savings).toFixed(0)}
+              </Text>
+            </View>
+          </View>
         </View>
-
-        
-
 
         {/* Recent Expenses */}
         <View className="bg-white rounded-2xl p-5 mb-6 shadow-md">
@@ -326,6 +357,10 @@ export default function ExpenseTrackerScreen() {
                   <Text className="text-xs text-[#7F8C8D]">{expense.date}</Text>
                 </View>
                 <View className="flex-row items-center">
+                  <View className={`w-3 h-3 rounded-full mr-2 ${
+                    expense.category === "Needs" ? "bg-[#3498DB]" : 
+                    expense.category === "Wants" ? "bg-[#9B59B6]" : "bg-[#2ECC71]"
+                  }`} />
                   <Text className="font-bold text-[#2C3E50] mr-2">₱{expense.amount.toFixed(2)}</Text>
                   <TouchableOpacity onPress={() => deleteExpense(expense.id)}>
                     <Trash2 size={18} color="#E74C3C" />
@@ -333,6 +368,9 @@ export default function ExpenseTrackerScreen() {
                 </View>
               </View>
             ))}
+            {expenses.length === 0 && (
+              <Text className="text-center text-[#7F8C8D] py-4">No expenses yet. Start chatting with the AI assistant to add expenses!</Text>
+            )}
           </View>
         </View>
 
